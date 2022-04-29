@@ -286,7 +286,7 @@ impl Registers {
 // internally and simply attempts to read the specified address. So the
 // correctness of the address needs to be guaranteed by the caller.
 #[inline]
-#[cfg(not(all(target_os = "linux", feature = "memory-access-check")))]
+#[cfg(not(feature = "memory-access-check"))]
 fn load<T: Copy>(address: u64) -> Option<T> {
     unsafe { Some(*(address as *const T)) }
 }
@@ -296,7 +296,7 @@ fn load<T: Copy>(address: u64) -> Option<T> {
 // A memory accessibility check will be performed before accessing the
 // target address.
 #[inline]
-#[cfg(all(target_os = "linux", feature = "memory-access-check"))]
+#[cfg(feature = "memory-access-check")]
 fn load<T: Copy>(address: u64) -> Option<T> {
     if access_check::can_access(address) {
         unsafe { Some(*(address as *const T)) }
@@ -305,7 +305,7 @@ fn load<T: Copy>(address: u64) -> Option<T> {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "memory-access-check"))]
+#[cfg(feature = "memory-access-check")]
 mod access_check {
     use std::mem::MaybeUninit;
 
@@ -313,7 +313,7 @@ mod access_check {
         static CAN_ACCESS_PIPE: [libc::c_int; 2] = {
             unsafe {
                 let mut fds = MaybeUninit::<[libc::c_int; 2]>::uninit();
-                let res = libc::pipe2(fds.as_mut_ptr() as *mut libc::c_int, libc::O_CLOEXEC | libc::O_NONBLOCK);
+                let res = create_pipe(fds.as_mut_ptr() as *mut libc::c_int);
                 if res == 0 {
                     [fds.assume_init()[0], fds.assume_init()[1]]
                 } else {
@@ -335,7 +335,7 @@ mod access_check {
             let can_read = loop {
                 let size = libc::read(pipes[0], buffer.as_mut_ptr() as _, buffer.len() as _);
                 if size == -1 {
-                    match (*libc::__errno_location()) as libc::c_int {
+                    match errno() {
                         libc::EINTR => continue,
                         libc::EAGAIN => break true,
                         _ => break false,
@@ -352,7 +352,7 @@ mod access_check {
             loop {
                 let size = libc::write(pipes[1], address as _, 1);
                 if size == -1 {
-                    match (*libc::__errno_location()) as libc::c_int {
+                    match errno() {
                         libc::EINTR => continue,
                         libc::EAGAIN => break true,
                         _ => break false,
@@ -362,6 +362,48 @@ mod access_check {
                 }
             }
         })
+    }
+
+    #[inline]
+    #[cfg(target_os = "linux")]
+    unsafe fn create_pipe(fds: *mut libc::c_int) -> libc::c_int {
+        libc::pipe2(fds, libc::O_CLOEXEC | libc::O_NONBLOCK)
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn create_pipe(fds: *mut libc::c_int) -> libc::c_int {
+        let res = libc::pipe(fds);
+        if res != 0 {
+            return res;
+        }
+        let fds = fds as *mut [libc::c_int; 2];
+        for n in 0..2 {
+            let mut flags = libc::fcntl((*fds)[n], libc::F_GETFD);
+            flags |= libc::O_CLOEXEC;
+            let res = libc::fcntl((*fds)[n], libc::F_SETFD, flags);
+            if res != 0 {
+                return res;
+            }
+            let mut flags = libc::fcntl((*fds)[n], libc::F_GETFL);
+            flags |= libc::O_NONBLOCK;
+            let res = libc::fcntl((*fds)[n], libc::F_SETFL, flags);
+            if res != 0 {
+                return res;
+            }
+        }
+        0
+    }
+
+    #[inline]
+    #[cfg(target_os = "linux")]
+    fn errno() -> libc::c_int {
+        unsafe { (*libc::__errno_location()) as libc::c_int }
+    }
+
+    #[inline]
+    #[cfg(target_os = "macos")]
+    fn errno() -> libc::c_int {
+        unsafe { (*libc::__error()) as libc::c_int }
     }
 
     #[cfg(test)]
