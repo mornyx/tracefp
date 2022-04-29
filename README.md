@@ -21,6 +21,20 @@ Where `x86_64-unknown-linux-gnu` can be replaced with other values, and `build-s
 
 > NOTE: When you're using this library on **macOS + aarch64**, you don't need to do anything, as all libraries for this platform turn on frame-pointer by default.
 
+# Install
+
+```toml
+[dependencies]
+tracefp = "0.0.1"
+```
+
+Or you want to turn off memory access checking (not recommended, this may lead to segfaults when the frame pointer does not exist):
+
+```toml
+[dependencies]
+tracefp = { version = "0.0.1", default-features = false }
+```
+
 # Examples
 
 ## Stack backtrace
