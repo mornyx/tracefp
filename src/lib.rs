@@ -143,6 +143,8 @@
 //! 0x921a7fffffffffff
 //! ```
 
+use std::mem::MaybeUninit;
+
 /// Inspects the current call-stack, passing all active PCs into the closure
 /// provided to calculate a stack trace.
 ///
@@ -186,13 +188,27 @@ where
         return;
     }
     while fp != 0 {
-        pc = load::<u64>(fp + 8);
+        pc = match load_with_check::<u64>(fp + 8) {
+            Some(v) => v,
+            None => return,
+        };
         pc -= 1;
         if !f(pc) {
             return;
         }
-        fp = load::<u64>(fp);
+        fp = match load_with_check::<u64>(fp) {
+            Some(v) => v,
+            None => return,
+        };
     }
+}
+
+extern "C" {
+    // getcontext() in libc.
+    //
+    // We declare here instead of using `libc::getcontext()` directly because
+    // `libc::getcontext()` is not found on macOS.
+    fn getcontext(_ucontext: *mut libc::c_void) -> libc::c_int;
 }
 
 // Register context for stack backtracking.
@@ -270,18 +286,76 @@ impl Registers {
 //
 // Note that although `load` is not unsafe, it is implemented by unsafe
 // internally and simply attempts to read the specified address. So the
-// correctness of the address needs to be guaranteed by the caller.
+// correctness of the address needs to be guaranteed by the caller. So
+// before using `load`, you can use `can_access` to check whether the
+// target address is valid.
 #[inline]
 fn load<T: Copy>(address: u64) -> T {
     unsafe { *(address as *const T) }
 }
 
-extern "C" {
-    // getcontext() in libc.
-    //
-    // We declare here instead of using `libc::getcontext()` directly because
-    // `libc::getcontext()` is not found on macOS.
-    fn getcontext(_ucontext: *mut libc::c_void) -> libc::c_int;
+#[inline]
+fn load_with_check<T: Copy>(address: u64) -> Option<T> {
+    if can_access(address) {
+        load(address)
+    } else {
+        None
+    }
+}
+
+thread_local! {
+    static CAN_ACCESS_PIPE: [libc::c_int; 2] = {
+        unsafe {
+            let mut fds = MaybeUninit::<[libc::c_int; 2]>::uninit();
+            let res = libc::pipe2(fds.as_mut_ptr() as *mut libc::c_int, libc::O_CLOEXEC | libc::O_NONBLOCK);
+            if res == 0 {
+                [fds.assume_init()[0], fds.assume_init()[1]]
+            } else {
+                [-1, -1]
+            }
+        }
+    };
+}
+
+// Check whether the target address is valid.
+fn can_access(address: u64) -> bool {
+    CAN_ACCESS_PIPE.with(|pipes| unsafe {
+        // The pipe initialization failed at that time.
+        if pipes[0] == -1 || pipes[1] == -1 {
+            return false;
+        }
+        // Clear data that already exists in the pipe.
+        let mut buffer = [0u8; 8];
+        let can_read = loop {
+            let size = libc::read(pipes[0], buffer.as_mut_ptr() as _, buffer.len() as _);
+            if size == -1 {
+                match (*libc::__errno_location()) as libc::c_int {
+                    libc::EINTR => continue,
+                    libc::EAGAIN => break true,
+                    _ => break false,
+                }
+            } else if size > 0 {
+                break true;
+            }
+        };
+        if !can_read {
+            return false;
+        }
+        // Try to write "data" to the pipe, let the kernel access the address, if
+        // the address is invalid, we will fail the write.
+        loop {
+            let size = libc::write(pipes[1], address as _, 1);
+            if size == -1 {
+                match (*libc::__errno_location()) as libc::c_int {
+                    libc::EINTR => continue,
+                    libc::EAGAIN => break true,
+                    _ => break false,
+                }
+            } else if size > 0 {
+                break true;
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -296,5 +370,15 @@ mod tests {
         let val = u64::MAX;
         let loc = &val as *const u64 as u64;
         assert_eq!(load::<u64>(loc), val);
+    }
+
+    #[test]
+    fn test_can_access() {
+        let v1 = 1;
+        let v2 = Box::new(1);
+        assert!(can_access(&v1 as *const i32 as u64));
+        assert!(can_access(v2.as_ref() as *const i32 as u64));
+        assert!(!can_access(0));
+        assert!(!can_access(u64::MAX));
     }
 }
