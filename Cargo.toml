@@ -12,3 +12,7 @@ libc = "0.2"
 [dev-dependencies]
 nix = "0.24"
 backtrace = "0.3"
+
+[features]
+default = ["memory-access-check"]
+memory-access-check = []
