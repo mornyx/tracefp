@@ -298,7 +298,7 @@ fn load<T: Copy>(address: u64) -> Option<T> {
 #[inline]
 #[cfg(all(target_os = "linux", feature = "memory-access-check"))]
 fn load<T: Copy>(address: u64) -> Option<T> {
-    if can_access(address) {
+    if access_check::can_access(address) {
         unsafe { Some(*(address as *const T)) }
     } else {
         None
@@ -323,8 +323,8 @@ mod access_check {
         };
     }
 
-    // Check whether the target address is valid.
-    fn can_access(address: u64) -> bool {
+    /// Check whether the target address is valid.
+    pub fn can_access(address: u64) -> bool {
         CAN_ACCESS_PIPE.with(|pipes| unsafe {
             // The pipe initialization failed at that time.
             if pipes[0] == -1 || pipes[1] == -1 {
