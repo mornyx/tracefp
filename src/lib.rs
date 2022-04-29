@@ -255,7 +255,7 @@ impl Registers {
             return None;
         }
         let mcontext = unsafe { (*ucontext).uc_mcontext };
-        Ok(Self {
+        Some(Self {
             pc: mcontext.pc,
             fp: mcontext.regs[29],
         })
